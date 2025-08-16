@@ -1,0 +1,536 @@
+---
+- name: DevOps CI/CD Pipeline Infrastructure Configuration
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # Application configuration
+    app_name: "devops-cicd-app"
+    app_version: "1.0.0"
+    app_port: 3000
+    
+    # Docker configuration
+    docker_registry: "ghcr.io"
+    docker_image: "{{ app_name }}"
+    docker_tag: "latest"
+    
+    # Kubernetes configuration
+    k8s_namespace: "default"
+    k8s_replicas: 3
+    
+    # Monitoring configuration
+    prometheus_retention_days: 7
+    grafana_admin_password: "admin"
+    
+    # Security configuration
+    enable_security_scans: true
+    enable_secrets_management: true
+    enable_network_policies: true
+    
+    # Backup configuration
+    enable_backups: true
+    backup_retention_days: 7
+    backup_schedule: "0 2 * * *"
+    
+  pre_tasks:
+    - name: Update package cache
+      package_facts:
+        manager: auto
+      
+    - name: Install required packages
+      package:
+        name:
+          - curl
+          - wget
+          - unzip
+          - git
+          - vim
+          - htop
+          - net-tools
+          - tree
+        state: present
+        update_cache: yes
+      
+    - name: Create application user
+      user:
+        name: "{{ app_name }}"
+        system: yes
+        shell: /bin/false
+        home: "/opt/{{ app_name }}"
+        createhome: no
+        
+    - name: Create application directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_name }}"
+        group: "{{ app_name }}"
+        mode: '0755'
+      loop:
+        - "/opt/{{ app_name }}"
+        - "/opt/{{ app_name }}/logs"
+        - "/opt/{{ app_name }}/config"
+        - "/opt/{{ app_name }}/data"
+        
+  tasks:
+    - name: Install Docker
+      block:
+        - name: Add Docker GPG key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+          when: ansible_os_family == "Debian"
+          
+        - name: Add Docker repository
+          apt_repository:
+            repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+            state: present
+          when: ansible_os_family == "Debian"
+          
+        - name: Install Docker packages
+          package:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+              - docker-compose-plugin
+            state: present
+            update_cache: yes
+          when: ansible_os_family == "Debian"
+          
+        - name: Install Docker (RedHat)
+          package:
+            name:
+              - docker
+              - docker-compose
+            state: present
+          when: ansible_os_family == "RedHat"
+          
+        - name: Start and enable Docker service
+          systemd:
+            name: docker
+            state: started
+            enabled: yes
+            
+        - name: Add user to docker group
+          user:
+            name: "{{ ansible_user }}"
+            groups: docker
+            append: yes
+            
+    - name: Install kubectl
+      block:
+        - name: Download kubectl binary
+          get_url:
+            url: "https://dl.k8s.io/release/{{ kubectl_version | default('stable') }}/bin/linux/amd64/kubectl"
+            dest: /usr/local/bin/kubectl
+            mode: '0755'
+            
+        - name: Verify kubectl installation
+          command: kubectl version --client
+          register: kubectl_version_output
+          changed_when: false
+          
+    - name: Install Helm
+      block:
+        - name: Download Helm binary
+          get_url:
+            url: "https://get.helm.sh/helm-{{ helm_version | default('v3.12.0') }}-linux-amd64.tar.gz"
+            dest: /tmp/helm.tar.gz
+            
+        - name: Extract Helm
+          unarchive:
+            src: /tmp/helm.tar.gz
+            dest: /tmp
+            remote_src: yes
+            
+        - name: Install Helm binary
+          copy:
+            src: "/tmp/linux-amd64/helm"
+            dest: /usr/local/bin/helm
+            mode: '0755'
+            remote_src: yes
+            
+        - name: Clean up Helm files
+          file:
+            path: /tmp/helm.tar.gz
+            state: absent
+            
+        - name: Clean up Helm directory
+          file:
+            path: /tmp/linux-amd64
+            state: absent
+            
+    - name: Install security tools
+      block:
+        - name: Install Trivy
+          get_url:
+            url: "https://github.com/aquasecurity/trivy/releases/download/{{ trivy_version | default('v0.45.0') }}/trivy_{{ trivy_version | default('v0.45.0') | regex_replace('^v', '') }}_Linux-64bit.tar.gz"
+            dest: /tmp/trivy.tar.gz
+            
+        - name: Extract Trivy
+          unarchive:
+            src: /tmp/trivy.tar.gz
+            dest: /tmp
+            remote_src: yes
+            
+        - name: Install Trivy binary
+          copy:
+            src: /tmp/trivy
+            dest: /usr/local/bin/trivy
+            mode: '0755'
+            remote_src: yes
+            
+        - name: Clean up Trivy files
+          file:
+            path: /tmp/trivy.tar.gz
+            state: absent
+            
+        - name: Clean up Trivy directory
+          file:
+            path: /tmp/trivy
+            state: absent
+            
+        - name: Install Gitleaks
+          get_url:
+            url: "https://github.com/zricethezav/gitleaks/releases/download/{{ gitleaks_version | default('v8.16.4') }}/gitleaks_{{ gitleaks_version | default('v8.16.4') | regex_replace('^v', '') }}_linux_x64.tar.gz"
+            dest: /tmp/gitleaks.tar.gz
+            
+        - name: Extract Gitleaks
+          unarchive:
+            src: /tmp/gitleaks.tar.gz
+            dest: /tmp
+            remote_src: yes
+            
+        - name: Install Gitleaks binary
+          copy:
+            src: /tmp/gitleaks
+            dest: /usr/local/bin/gitleaks
+            mode: '0755'
+            remote_src: yes
+            
+        - name: Clean up Gitleaks files
+          file:
+            path: /tmp/gitleaks.tar.gz
+            state: absent
+            
+        - name: Clean up Gitleaks binary
+          file:
+            path: /tmp/gitleaks
+            state: absent
+            
+    - name: Configure Docker daemon
+      block:
+        - name: Create Docker daemon configuration directory
+          file:
+            path: /etc/docker
+            state: directory
+            mode: '0755'
+            
+        - name: Configure Docker daemon
+          copy:
+            dest: /etc/docker/daemon.json
+            content: |
+              {
+                "log-driver": "json-file",
+                "log-opts": {
+                  "max-size": "10m",
+                  "max-file": "3"
+                },
+                "storage-driver": "overlay2",
+                "insecure-registries": ["{{ docker_registry }}"],
+                "experimental": true,
+                "metrics-addr": "0.0.0.0:9323",
+                "enable-debug": true
+              }
+            mode: '0644'
+            
+        - name: Restart Docker service
+          systemd:
+            name: docker
+            state: restarted
+            
+    - name: Configure monitoring
+      block:
+        - name: Create monitoring configuration
+          copy:
+            dest: "/opt/{{ app_name }}/config/monitoring.yml"
+            content: |
+              prometheus:
+                retention_days: {{ prometheus_retention_days }}
+                scrape_interval: 15s
+                evaluation_interval: 15s
+                
+              grafana:
+                admin_password: {{ grafana_admin_password }}
+                security:
+                  admin_user: admin
+                  allow_embedding: true
+                  
+              alerting:
+                enabled: true
+                slack_webhook: "{{ slack_webhook | default('') }}"
+                discord_webhook: "{{ discord_webhook | default('') }}"
+                
+            mode: '0644'
+            owner: "{{ app_name }}"
+            group: "{{ app_name }}"
+            
+    - name: Configure security policies
+      block:
+        - name: Create security configuration
+          copy:
+            dest: "/opt/{{ app_name }}/config/security.yml"
+            content: |
+              security:
+                enable_scans: {{ enable_security_scans | lower }}
+                enable_secrets_management: {{ enable_secrets_management | lower }}
+                enable_network_policies: {{ enable_network_policies | lower }}
+                
+              scanning:
+                trivy:
+                  enabled: true
+                  severity_threshold: "HIGH"
+                  ignore_unfixed: false
+                  
+                gitleaks:
+                  enabled: true
+                  verbose: true
+                  
+                sonarqube:
+                  enabled: true
+                  quality_gate: true
+                  coverage_threshold: 80
+                  
+              secrets:
+                vault_enabled: false
+                encryption_key: "{{ vault_encryption_key | default('') }}"
+                
+            mode: '0644'
+            owner: "{{ app_name }}"
+            group: "{{ app_name }}"
+            
+    - name: Configure backup policies
+      block:
+        - name: Create backup configuration
+          copy:
+            dest: "/opt/{{ app_name }}/config/backup.yml"
+            content: |
+              backup:
+                enabled: {{ enable_backups | lower }}
+                retention_days: {{ backup_retention_days }}
+                schedule: "{{ backup_schedule }}"
+                
+              storage:
+                type: "local"
+                path: "/opt/{{ app_name }}/backups"
+                compression: true
+                
+              databases:
+                - name: "app_database"
+                  type: "postgresql"
+                  host: "{{ db_host | default('localhost') }}"
+                  port: "{{ db_port | default(5432) }}"
+                  database: "{{ db_name | default('devopscicd') }}"
+                  
+              files:
+                - path: "/opt/{{ app_name }}/data"
+                  exclude: ["*.tmp", "*.log"]
+                  
+            mode: '0644'
+            owner: "{{ app_name }}"
+            group: "{{ app_name }}"
+            
+        - name: Create backup script
+          copy:
+            dest: "/opt/{{ app_name }}/scripts/backup.sh"
+            content: |
+              #!/bin/bash
+              # Backup script for DevOps CI/CD Pipeline
+              
+              set -e
+              
+              BACKUP_DIR="/opt/{{ app_name }}/backups"
+              DATE=$(date +%Y%m%d_%H%M%S)
+              BACKUP_FILE="backup_${DATE}.tar.gz"
+              
+              # Create backup directory
+              mkdir -p "$BACKUP_DIR"
+              
+              # Backup configuration files
+              tar -czf "$BACKUP_DIR/config_${BACKUP_FILE}" -C /opt/{{ app_name }} config/
+              
+              # Backup data directory
+              tar -czf "$BACKUP_DIR/data_${BACKUP_FILE}" -C /opt/{{ app_name }} data/
+              
+              # Backup logs (last 7 days)
+              find /opt/{{ app_name }}/logs -name "*.log" -mtime -7 -exec tar -czf "$BACKUP_DIR/logs_${BACKUP_FILE}" {} \;
+              
+              # Clean up old backups
+              find "$BACKUP_DIR" -name "*.tar.gz" -mtime +{{ backup_retention_days }} -delete
+              
+              echo "Backup completed: $BACKUP_FILE"
+              
+            mode: '0755'
+            owner: "{{ app_name }}"
+            group: "{{ app_name }}"
+            
+    - name: Configure log rotation
+      block:
+        - name: Create logrotate configuration
+          copy:
+            dest: /etc/logrotate.d/{{ app_name }}
+            content: |
+              /opt/{{ app_name }}/logs/*.log {
+                  daily
+                  missingok
+                  rotate 7
+                  compress
+                  delaycompress
+                  notifempty
+                  create 644 {{ app_name }} {{ app_name }}
+                  postrotate
+                      systemctl reload {{ app_name }} || true
+                  endscript
+              }
+            mode: '0644'
+            
+    - name: Configure systemd service
+      block:
+        - name: Create systemd service file
+          copy:
+            dest: /etc/systemd/system/{{ app_name }}.service
+            content: |
+              [Unit]
+              Description=DevOps CI/CD Pipeline Application
+              After=network.target docker.service
+              Requires=docker.service
+              
+              [Service]
+              Type=simple
+              User={{ app_name }}
+              Group={{ app_name }}
+              WorkingDirectory=/opt/{{ app_name }}
+              Environment=NODE_ENV=production
+              Environment=PORT={{ app_port }}
+              ExecStart=/usr/bin/docker run --rm -p {{ app_port }}:{{ app_port }} {{ docker_registry }}/{{ docker_image }}:{{ docker_tag }}
+              ExecReload=/bin/kill -HUP $MAINPID
+              Restart=always
+              RestartSec=10
+              
+              [Install]
+              WantedBy=multi-user.target
+            mode: '0644'
+            
+        - name: Reload systemd daemon
+          systemd:
+            daemon_reload: yes
+            
+        - name: Enable and start service
+          systemd:
+            name: "{{ app_name }}"
+            state: started
+            enabled: yes
+            
+    - name: Configure firewall
+      block:
+        - name: Install UFW (Ubuntu/Debian)
+          package:
+            name: ufw
+            state: present
+          when: ansible_os_family == "Debian"
+          
+        - name: Install firewalld (RedHat)
+          package:
+            name: firewalld
+            state: present
+          when: ansible_os_family == "RedHat"
+          
+        - name: Configure UFW rules
+          ufw:
+            rule: allow
+            port: "{{ item }}"
+            proto: tcp
+          loop:
+            - "22"
+            - "{{ app_port }}"
+            - "30000"
+            - "30001"
+            - "30002"
+          when: ansible_os_family == "Debian"
+          
+        - name: Enable UFW
+          ufw:
+            state: enabled
+          when: ansible_os_family == "Debian"
+          
+        - name: Configure firewalld rules
+          firewalld:
+            port: "{{ item }}"
+            permanent: yes
+            state: enabled
+          loop:
+            - "22/tcp"
+            - "{{ app_port }}/tcp"
+            - "30000/tcp"
+            - "30001/tcp"
+            - "30002/tcp"
+          when: ansible_os_family == "RedHat"
+          
+        - name: Start and enable firewalld
+          systemd:
+            name: firewalld
+            state: started
+            enabled: yes
+          when: ansible_os_family == "RedHat"
+          
+  post_tasks:
+    - name: Verify Docker installation
+      command: docker --version
+      register: docker_version_output
+      changed_when: false
+      
+    - name: Verify kubectl installation
+      command: kubectl version --client
+      register: kubectl_version_output
+      changed_when: false
+      
+    - name: Verify Helm installation
+      command: helm version
+      register: helm_version_output
+      changed_when: false
+      
+    - name: Verify security tools installation
+      command: trivy --version
+      register: trivy_version_output
+      changed_when: false
+      
+    - name: Verify service status
+      systemd:
+        name: "{{ app_name }}"
+      register: service_status
+      
+    - name: Display installation summary
+      debug:
+        msg: |
+          DevOps CI/CD Pipeline Infrastructure Configuration Complete!
+          
+          Installed Components:
+          - Docker: {{ docker_version_output.stdout }}
+          - kubectl: {{ kubectl_version_output.stdout }}
+          - Helm: {{ helm_version_output.stdout }}
+          - Trivy: {{ trivy_version_output.stdout }}
+          
+          Service Status: {{ service_status.status.ActiveState }}
+          
+          Configuration Files:
+          - Monitoring: /opt/{{ app_name }}/config/monitoring.yml
+          - Security: /opt/{{ app_name }}/config/security.yml
+          - Backup: /opt/{{ app_name }}/config/backup.yml
+          
+          Next Steps:
+          1. Configure your Docker registry credentials
+          2. Set up Kubernetes cluster
+          3. Deploy the application using kubectl or Helm
+          4. Access the monitoring dashboards

@@ -1,0 +1,340 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_REGISTRY = 'your-registry.com'
+        IMAGE_NAME = 'devops-cicd-app'
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
+        SONAR_TOKEN = credentials('sonar-token')
+        KUBECONFIG = credentials('kubeconfig')
+        SLACK_CHANNEL = '#devops'
+        SLACK_WEBHOOK = credentials('slack-webhook')
+    }
+    
+    options {
+        timeout(time: 1, unit: 'HOURS')
+        timestamps()
+        ansiColor('xterm')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            parallel {
+                stage('Gitleaks Scan') {
+                    steps {
+                        script {
+                            def gitleaks = docker.image('zricethezav/gitleaks:latest')
+                            gitleaks.inside('-v ${WORKSPACE}:/path') {
+                                sh '''
+                                    cd /path
+                                    gitleaks detect --source . --report-format json --report-path gitleaks-report.json
+                                '''
+                            }
+                            
+                            // Parse and analyze results
+                            def report = readJSON file: 'gitleaks-report.json'
+                            if (report.size() > 0) {
+                                error "Gitleaks found ${report.size()} secrets in the codebase!"
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            publishJSON([
+                                include: 'gitleaks-report.json',
+                                name: 'Gitleaks Report'
+                            ])
+                        }
+                    }
+                }
+                
+                stage('Trivy Filesystem Scan') {
+                    steps {
+                        script {
+                            def trivy = docker.image('aquasec/trivy:latest')
+                            trivy.inside('-v ${WORKSPACE}:/path') {
+                                sh '''
+                                    cd /path
+                                    trivy fs --format json --output trivy-fs-report.json .
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            publishJSON([
+                                include: 'trivy-fs-report.json',
+                                name: 'Trivy Filesystem Report'
+                            ])
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Code Quality') {
+            steps {
+                script {
+                    def sonar = docker.image('sonarqube:community')
+                    sonar.inside('-v ${WORKSPACE}:/path') {
+                        sh '''
+                            cd /path/src/app
+                            npm ci
+                            npm run lint
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'src/app/coverage',
+                        reportFiles: 'index.html',
+                        reportName: 'Code Coverage Report'
+                    ])
+                }
+            }
+        }
+        
+        stage('Testing') {
+            steps {
+                dir('src/app') {
+                    sh 'npm ci'
+                    sh 'npm run test:coverage'
+                }
+            }
+            post {
+                always {
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'src/app/coverage',
+                        reportFiles: 'index.html',
+                        reportName: 'Test Coverage Report'
+                    ])
+                    
+                    publishTestResults testResultsPattern: 'src/app/test-results/*.xml'
+                }
+            }
+        }
+        
+        stage('Dependency Scan') {
+            steps {
+                script {
+                    def owasp = docker.image('owasp/dependency-check:latest')
+                    owasp.inside('-v ${WORKSPACE}:/path') {
+                        sh '''
+                            cd /path
+                            dependency-check --scan src/app --format HTML --out reports --project "DevOps CI/CD Pipeline"
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'reports',
+                        reportFiles: 'dependency-check-report.html',
+                        reportName: 'OWASP Dependency Check Report'
+                    ])
+                }
+            }
+        }
+        
+        stage('Build & Container Security') {
+            steps {
+                script {
+                    // Build Docker image
+                    dir('src/app') {
+                        sh "docker build -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} ."
+                        sh "docker tag ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest"
+                    }
+                    
+                    // Scan container image
+                    def trivy = docker.image('aquasec/trivy:latest')
+                    trivy.inside('-v /var/run/docker.sock:/var/run/docker.sock') {
+                        sh '''
+                            trivy image --format json --output trivy-image-report.json ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+                        '''
+                    }
+                    
+                    // Analyze scan results
+                    def imageReport = readJSON file: 'trivy-image-report.json'
+                    def criticalVulns = imageReport.Results.findAll { result ->
+                        result.Vulnerabilities.any { vuln ->
+                            vuln.Severity == 'CRITICAL'
+                        }
+                    }
+                    
+                    if (criticalVulns.size() > 0) {
+                        error "Container image contains ${criticalVulns.size()} critical vulnerabilities!"
+                    }
+                }
+            }
+            post {
+                always {
+                    publishJSON([
+                        include: 'trivy-image-report.json',
+                        name: 'Trivy Image Report'
+                    ])
+                }
+            }
+        }
+        
+        stage('Push to Registry') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'docker-registry-credentials',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+                        sh '''
+                            docker login ${DOCKER_REGISTRY} -u ${DOCKER_USER} -p ${DOCKER_PASS}
+                            docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+                            docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                script {
+                    sh '''
+                        kubectl config use-context staging
+                        kubectl set image deployment/devops-cicd-app devops-cicd-app=${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} -n staging
+                        kubectl rollout status deployment/devops-cicd-app -n staging
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    sh '''
+                        kubectl config use-context production
+                        kubectl set image deployment/devops-cicd-app devops-cicd-app=${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} -n production
+                        kubectl rollout status deployment/devops-cicd-app -n production
+                    '''
+                }
+            }
+        }
+        
+        stage('Integration Tests') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    def testImage = docker.image("${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}")
+                    testImage.inside('-p 3000:3000') {
+                        sh '''
+                            # Wait for application to start
+                            sleep 30
+                            
+                            # Run integration tests
+                            curl -f http://localhost:3000/health || exit 1
+                            curl -f http://localhost:3000/api/v1/status || exit 1
+                            curl -f http://localhost:3000/metrics || exit 1
+                        '''
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            // Clean up Docker images
+            sh '''
+                docker rmi ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} || true
+                docker rmi ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest || true
+                docker system prune -f
+            '''
+            
+            // Archive artifacts
+            archiveArtifacts artifacts: '**/coverage/**/*,reports/**/*,*.json', fingerprint: true
+        }
+        
+        success {
+            script {
+                // Send success notification
+                slackSend(
+                    channel: env.SLACK_CHANNEL,
+                    color: 'good',
+                    message: "✅ Pipeline SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}\n" +
+                            "Branch: ${env.BRANCH_NAME}\n" +
+                            "Commit: ${env.GIT_COMMIT_SHORT}\n" +
+                            "Duration: ${currentBuild.durationString}"
+                )
+            }
+        }
+        
+        failure {
+            script {
+                // Send failure notification
+                slackSend(
+                    channel: env.SLACK_CHANNEL,
+                    color: 'danger',
+                    message: "❌ Pipeline FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}\n" +
+                            "Branch: ${env.BRANCH_NAME}\n" +
+                            "Commit: ${env.GIT_COMMIT_SHORT}\n" +
+                            "Duration: ${currentBuild.durationString}\n" +
+                            "Build URL: ${env.BUILD_URL}"
+                )
+            }
+        }
+        
+        unstable {
+            script {
+                // Send unstable notification
+                slackSend(
+                    channel: env.SLACK_CHANNEL,
+                    color: 'warning',
+                    message: "⚠️ Pipeline UNSTABLE: ${env.JOB_NAME} #${env.BUILD_NUMBER}\n" +
+                            "Branch: ${env.BRANCH_NAME}\n" +
+                            "Commit: ${env.GIT_COMMIT_SHORT}\n" +
+                            "Duration: ${currentBuild.durationString}"
+                )
+            }
+        }
+    }
+}

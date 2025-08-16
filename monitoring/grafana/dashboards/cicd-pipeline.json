@@ -1,0 +1,326 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "DevOps CI/CD Pipeline Dashboard",
+    "tags": ["devops", "cicd", "kubernetes", "monitoring"],
+    "style": "dark",
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "CI/CD Pipeline Overview",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "jenkins_builds_success_total",
+            "legendFormat": "Successful Builds"
+          },
+          {
+            "expr": "jenkins_builds_failed_total",
+            "legendFormat": "Failed Builds"
+          },
+          {
+            "expr": "jenkins_builds_in_progress_total",
+            "legendFormat": "Builds in Progress"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "displayMode": "list"
+            }
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "Application Health Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"devops-cicd-app\"}",
+            "legendFormat": "Application Status"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        }
+      },
+      {
+        "id": 3,
+        "title": "HTTP Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"devops-cicd-app\"}[5m])",
+            "legendFormat": "{{kubernetes_pod_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Requests per second",
+            "unit": "reqps"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 8
+        }
+      },
+      {
+        "id": 4,
+        "title": "Response Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_request_duration_seconds_sum{job=\"devops-cicd-app\"}[5m]) / rate(http_request_duration_seconds_count{job=\"devops-cicd-app\"}[5m])",
+            "legendFormat": "{{kubernetes_pod_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Response Time",
+            "unit": "s"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 16
+        }
+      },
+      {
+        "id": 5,
+        "title": "Kubernetes Pod Status",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "kube_pod_status_phase",
+            "legendFormat": "{{pod}} - {{phase}}"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {
+                "__name__": true,
+                "job": true,
+                "instance": true,
+                "pod": true
+              },
+              "renameByName": {
+                "phase": "Status",
+                "namespace": "Namespace"
+              }
+            }
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 24
+        }
+      },
+      {
+        "id": 6,
+        "title": "CPU Usage by Pod",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(container_cpu_usage_seconds_total{container!=\"POD\"}[5m]) * 100",
+            "legendFormat": "{{pod}} - {{container}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "CPU Usage",
+            "unit": "percent"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 32
+        }
+      },
+      {
+        "id": 7,
+        "title": "Memory Usage by Pod",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(container_memory_usage_bytes{container!=\"POD\"}[5m]) / 1024 / 1024",
+            "legendFormat": "{{pod}} - {{container}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Memory Usage",
+            "unit": "MB"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 32
+        }
+      },
+      {
+        "id": 8,
+        "title": "Security Scan Results",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trivy_vulnerabilities_total{severity=\"CRITICAL\"}",
+            "legendFormat": "Critical Vulnerabilities"
+          },
+          {
+            "expr": "trivy_vulnerabilities_total{severity=\"HIGH\"}",
+            "legendFormat": "High Vulnerabilities"
+          },
+          {
+            "expr": "trivy_vulnerabilities_total{severity=\"MEDIUM\"}",
+            "legendFormat": "Medium Vulnerabilities"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 5}
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 40
+        }
+      },
+      {
+        "id": 9,
+        "title": "Code Quality Metrics",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sonarqube_quality_gate_status",
+            "legendFormat": "Quality Gate Status"
+          },
+          {
+            "expr": "sonarqube_coverage",
+            "legendFormat": "Code Coverage"
+          },
+          {
+            "expr": "sonarqube_duplicated_lines_density",
+            "legendFormat": "Duplication"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 70},
+                {"color": "green", "value": 90}
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 48
+        }
+      },
+      {
+        "id": 10,
+        "title": "Infrastructure Health",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"kubernetes-nodes\"}",
+            "legendFormat": "Node Status"
+          },
+          {
+            "expr": "up{job=\"kubernetes-apiservers\"}",
+            "legendFormat": "API Server Status"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 56
+        }
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "30s",
+    "schemaVersion": 27,
+    "version": 1,
+    "links": [],
+    "annotations": {
+      "list": []
+    }
+  }
+}
